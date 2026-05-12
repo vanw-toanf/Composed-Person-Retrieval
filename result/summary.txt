@@ -1,0 +1,12 @@
+Checkpoint : ../output/cpr/FAFA_experiment/saved_models/tuned_recall_at1_step.pt
+Dataset    : ITCPR (2202 queries, 20510 gallery)
+
+R@1   : 46.6848%
+R@5   : 66.3034%
+R@10  : 73.2516%
+mAP   : 55.6923%
+mINP  : 55.6861%
+
+Samples shown : 10 queries
+  - 5 queries where R@1 = correct (hit)
+  - 5 queries where R@1 = wrong  (miss)
