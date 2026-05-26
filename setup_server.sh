@@ -10,7 +10,7 @@ apt update && apt upgrade -y
 echo ">>> Cài đặt các công cụ hỗ trợ..."
 apt install unzip tmux wget git build-essential -y
 apt-get install -y libgl1 2>&1 | tail -3
-apt-get install -y libglib2.0-0 libgl1-mesa-glx
+apt-get install -y libglib2.0-0 libgl1-mesa-dev libglx-mesa0 libgl1
 
 echo ">>> Cài đặt Miniconda..."
 mkdir -p ~/miniconda3

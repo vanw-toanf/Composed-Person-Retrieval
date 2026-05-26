@@ -421,6 +421,32 @@ class Blip2FAFACPR(Blip2Base):
         return image_features, image_embeds_frozen
 
     @torch.no_grad()
+    def extract_target_features_with_attn(self, image):
+        """Same as extract_target_features but also returns cross-attention maps."""
+        with self.maybe_autocast():
+            image_embeds_frozen = self.ln_vision(self.visual_encoder(image))
+        image_embeds_frozen = image_embeds_frozen.float()
+        image_atts = torch.ones(
+            image_embeds_frozen.size()[:-1], dtype=torch.long
+        ).to(self.device)
+        query_tokens = self.query_tokens.expand(
+            image_embeds_frozen.shape[0], -1, -1
+        )
+
+        query_output = self.Qformer.bert(
+            query_embeds=query_tokens,
+            encoder_hidden_states=image_embeds_frozen,
+            encoder_attention_mask=image_atts,
+            return_dict=True,
+            output_attentions=True,
+        )
+        image_embeds = query_output.last_hidden_state
+        image_features = F.normalize(self.vision_proj(image_embeds), dim=-1)
+        # cross_attentions: tuple of [B, heads, num_query_tokens, num_image_tokens]
+        cross_attentions = query_output.cross_attentions
+        return image_features, cross_attentions
+
+    @torch.no_grad()
     def extract_features(self, samples, mode="multimodal"):
         """
         Extract features for multimodal or unimodal samples.

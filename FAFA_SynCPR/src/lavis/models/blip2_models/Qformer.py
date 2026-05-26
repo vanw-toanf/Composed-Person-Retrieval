@@ -449,7 +449,7 @@ class BertLayer(nn.Module):
                 )
                 query_attention_output = cross_attention_outputs[0]
                 outputs = (
-                    outputs + cross_attention_outputs[1:-1]
+                    outputs + cross_attention_outputs[1:]
                 )  # add cross attentions if we output attention weights
 
             layer_output = apply_chunking_to_forward(
