@@ -21,7 +21,6 @@ from data_utils import targetpad_transform, squarepad_transform, squarepad_trans
 from lavis.models import registry
 from lavis.models import load_model_and_preprocess
 from validate_blip import compute_ticpr_val_metrics
-from robustness_eval import run_robustness_evaluation
 
 
 def load_model_from_checkpoint(checkpoint_path, model_name='blip2_fafa_cpr', device='cuda'):
@@ -87,21 +86,6 @@ def main():
                         help='Number of data loader workers')
     parser.add_argument('--device', type=str, default='cuda',
                         help='Device to use (cuda/cpu)')
-    parser.add_argument('--robustness-eval', action='store_true',
-                        help='Run BenchCIR-style robustness evaluation after clean inference')
-    parser.add_argument('--robustness-groups', nargs='+',
-                        choices=['image', 'text', 'conflict'],
-                        default=['image', 'text', 'conflict'],
-                        help='Robustness groups to evaluate')
-    parser.add_argument('--robustness-severities', nargs='+', type=int,
-                        default=[1, 2, 3, 4, 5],
-                        help='Severity levels for perturbations')
-    parser.add_argument('--robustness-output', type=str, default=None,
-                        help='Output prefix for robustness CSV/JSON files')
-    parser.add_argument('--robustness-seed', type=int, default=42,
-                        help='Random seed for deterministic perturbations')
-    parser.add_argument('--robustness-max-queries', type=int, default=None,
-                        help='Optional limit for quick/debug robustness runs')
 
     args = parser.parse_args()
 
@@ -240,30 +224,6 @@ def main():
         json.dump(results, f, indent=4)
 
     print(f"\nResults saved to: {results_path}")
-
-    if args.robustness_eval:
-        output_prefix = args.robustness_output
-        if output_prefix is None:
-            safe_model_name = args.model_name.replace('.pt', '')
-            output_prefix = exp_path / f'robustness_results_{safe_model_name}'
-        print("\n" + "=" * 80)
-        print("RUNNING ROBUSTNESS EVALUATION")
-        print("=" * 80)
-        run_robustness_evaluation(
-            model,
-            val_dataset,
-            preprocess,
-            txt_processors,
-            output_prefix=Path(output_prefix),
-            groups=args.robustness_groups,
-            severities=args.robustness_severities,
-            batch_size=args.batch_size,
-            num_workers=args.num_workers,
-            soft=use_soft,
-            seed=args.robustness_seed,
-            max_queries=args.robustness_max_queries,
-        )
-
 
 if __name__ == '__main__':
     main()
