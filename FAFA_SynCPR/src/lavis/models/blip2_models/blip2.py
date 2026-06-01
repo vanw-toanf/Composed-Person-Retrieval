@@ -95,6 +95,11 @@ class Blip2Base(BaseModel):
 
         state_dict = checkpoint['model']
 
+        # Skip keys whose shape doesn't match (e.g. vocab size drift across transformers versions)
+        model_state = self.state_dict()
+        state_dict = {k: v for k, v in state_dict.items()
+                      if k not in model_state or v.shape == model_state[k].shape}
+
         msg = self.load_state_dict(state_dict, strict=False)
 
         # logging.info("Missing keys {}".format(msg.missing_keys))
