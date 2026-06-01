@@ -73,6 +73,13 @@ def compute_heatmap(
     heatmap = (attn.cpu() * scores.unsqueeze(0).unsqueeze(-1)).sum(dim=1)  # [B, 256]
 
     heatmap = heatmap.view(-1, n_patches_side, n_patches_side).numpy()  # [B, 16, 16]
+    B = heatmap.shape[0]
+
+    # Clip outlier patches (top 1%) that act as attention sinks — prevents one
+    # irrelevant patch from dominating the colormap and washing out real signal.
+    flat = heatmap.reshape(B, -1)
+    p99 = np.percentile(flat, 99, axis=1).reshape(B, 1, 1)
+    heatmap = np.clip(heatmap, None, p99)
 
     # Min-max normalize per sample
     mn, mx = heatmap.min(axis=(1, 2), keepdims=True), heatmap.max(axis=(1, 2), keepdims=True)
