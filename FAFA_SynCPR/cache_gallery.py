@@ -44,7 +44,14 @@ def load_model(checkpoint_path: Path, device: torch.device):
         state_dict = ckpt.get('model', ckpt.get('state_dict', ckpt))
     else:
         state_dict = ckpt
-    model.load_state_dict(state_dict, strict=False)
+    # Skip keys whose shape doesn't match current model (transformers version drift)
+    model_sd = model.state_dict()
+    filtered = {k: v for k, v in state_dict.items()
+                if k not in model_sd or v.shape == model_sd[k].shape}
+    skipped = [k for k in state_dict if k in model_sd and state_dict[k].shape != model_sd[k].shape]
+    if skipped:
+        print(f"  Skipped size-mismatched keys: {skipped}")
+    model.load_state_dict(filtered, strict=False)
     model.to(device).eval()
     return model, txt_processors
 
