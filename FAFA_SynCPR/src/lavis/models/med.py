@@ -37,12 +37,43 @@ from transformers.modeling_outputs import (
     SequenceClassifierOutput,
     TokenClassifierOutput,
 )
-from transformers.modeling_utils import (
-    PreTrainedModel,
-    apply_chunking_to_forward,
-    find_pruneable_heads_and_indices,
-    prune_linear_layer,
-)
+from transformers.modeling_utils import PreTrainedModel
+
+try:
+    from transformers.modeling_utils import apply_chunking_to_forward
+except ImportError:
+    from transformers.pytorch_utils import apply_chunking_to_forward
+
+try:
+    from transformers.modeling_utils import find_pruneable_heads_and_indices, prune_linear_layer
+except ImportError:
+    try:
+        from transformers.pytorch_utils import find_pruneable_heads_and_indices, prune_linear_layer
+    except ImportError:
+        import torch, torch.nn as nn
+
+        def find_pruneable_heads_and_indices(heads, n_heads, head_size, already_pruned_heads):
+            mask = torch.ones(n_heads, head_size)
+            heads = set(heads) - already_pruned_heads
+            for head in sorted(heads):
+                head = head - sum(1 if h < head else 0 for h in already_pruned_heads)
+                mask[head] = 0
+            mask = mask.view(-1).contiguous().eq(1)
+            index = torch.arange(len(mask))[mask].long()
+            return heads, index
+
+        def prune_linear_layer(layer, index, dim=0):
+            index = index.to(layer.weight.device)
+            W = layer.weight.index_select(dim, index).clone().detach()
+            b = layer.bias[index].clone().detach() if layer.bias is not None and dim == 0 \
+                else (layer.bias.clone().detach() if layer.bias is not None else None)
+            new_size = list(layer.weight.size())
+            new_size[dim] = len(index)
+            new_layer = nn.Linear(new_size[1], new_size[0], bias=b is not None).to(layer.weight.device)
+            new_layer.weight = nn.Parameter(W.contiguous())
+            if b is not None:
+                new_layer.bias = nn.Parameter(b.contiguous())
+            return new_layer
 from transformers.utils import logging
 from transformers.models.bert.configuration_bert import BertConfig
 from lavis.common.utils import get_abs_path
