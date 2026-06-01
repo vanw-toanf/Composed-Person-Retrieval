@@ -105,6 +105,10 @@ class MaxSimIndex:
         Q = qfeats.shape[0]
         if n_tokens_per_query is None:
             n_tokens_per_query = K_prime * 8  # heuristic: mỗi gallery có 32 token
+        # GPU FAISS giới hạn k ≤ 2048; CPU FAISS không giới hạn
+        GPU_MAX_K = 2048
+        if hasattr(self.index, 'getDevice'):  # GPU index
+            n_tokens_per_query = min(n_tokens_per_query, GPU_MAX_K)
         n_tokens_per_query = min(n_tokens_per_query, self.G * self.num_tokens)
 
         # FAISS batch search: [Q, N_tokens]
