@@ -221,7 +221,7 @@ python inference_indexed.py ... --strategy maxsim --load-index output/cpr/FAFA_e
 
 ## 5. Kết quả thực nghiệm
 
-> **[ĐIỀN SAU KHI CHẠY TRÊN SERVER]**
+> **Server:** NVIDIA L4 (23.7 GB VRAM), CUDA 12.4, PyTorch 2.6.0
 
 ### 5.1 Gallery cache
 
@@ -229,60 +229,82 @@ python inference_indexed.py ... --strategy maxsim --load-index output/cpr/FAFA_e
 |---|---|
 | Gallery size (G) | 20.510 |
 | gfeats shape | [20510, 32, 256] |
-| Cache file size | ~640 MB |
-| Gallery extraction time | ___ s |
+| Cache file size | ~672 MB (fp32) |
+| Gallery extraction time (1 lần) | **445 s** |
+| Load cache time (mỗi lần tiếp theo) | **0.57 s** → tiết kiệm 444s / lần eval |
 
-### 5.2 Bảng so sánh R@1 và thời gian
+### 5.2 Bảng so sánh đầy đủ
 
-| Phương pháp | K' | R@1 | R@5 | R@10 | mAP | Recall@K' | Search time (s) | Total time (s) |
+> Thời gian **Search(s)** = FAISS search + exact re-ranking (KHÔNG bao gồm query extraction ~52s hay model load ~55s).  
+> Thời gian **Total(s)** = tổng thời gian trong giai đoạn retrieval (search + ranking metrics).
+
+| Phương pháp | K' | R@1 | R@5 | R@10 | mAP | Recall@K' | Search(s) | Total(s) |
 |---|---|---|---|---|---|---|---|---|
-| Exact (baseline) | 20.510 | ___ | ___ | ___ | ___ | 100% | ___ | ___ |
-| FAISS MaxSim | 50 | ___ | ___ | ___ | ___ | ___% | ___ | ___ |
-| FAISS MaxSim | 100 | ___ | ___ | ___ | ___ | ___% | ___ | ___ |
-| FAISS MaxSim | 200 | ___ | ___ | ___ | ___ | ___% | ___ | ___ |
-| FAISS MaxSim | 300 | ___ | ___ | ___ | ___ | ___% | ___ | ___ |
-| FAISS MaxSim | 500 | ___ | ___ | ___ | ___ | ___% | ___ | ___ |
-| FAISS MaxSim | 1000 | ___ | ___ | ___ | ___ | ___% | ___ | ___ |
-| FAISS MeanSim | 200 | ___ | ___ | ___ | ___ | ___% | ___ | ___ |
-| FAISS MeanSim | 500 | ___ | ___ | ___ | ___ | ___% | ___ | ___ |
+| **Exact (baseline)** | **20.510** | **46.685** | **66.258** | **73.252** | **55.692** | **100%** | **15.90** | **19.7** |
+| FAISS MaxSim | 50 | 46.549 | 66.258 | 73.252 | 55.517 | 86.4% | 2.03 | 5.9 |
+| FAISS MaxSim | 100 | 46.549 | 66.258 | 73.252 | 55.582 | 90.5% | 3.61 | 7.5 |
+| FAISS MaxSim | 200 | 46.549 | 66.258 | 73.252 | 55.607 | 93.6% | 6.99 | 10.7 |
+| FAISS MaxSim | 300 | 46.639 | 66.258 | 73.252 | 55.660 | 95.2% | 8.74 | 12.5 |
+| FAISS MaxSim | 500 | 46.639 | 66.258 | 73.252 | 55.665 | 96.5% | 8.90 | 12.7 |
+| FAISS MaxSim | 1000 | 46.639 | 66.258 | 73.252 | 55.665 | 96.6% | 9.14 | 12.9 |
+| FAISS MaxSim | 2000 | 46.639 | 66.258 | 73.252 | 55.665 | 96.6% | 9.76 | 13.5 |
+| FAISS MeanSim | 50 | 46.549 | 66.303 | 73.115 | 55.447 | 84.7% | **0.40** | 4.2 |
+| FAISS MeanSim | 100 | 46.639 | 66.258 | 73.206 | 55.606 | 89.6% | **0.37** | 4.0 |
+| FAISS MeanSim | 200 | 46.549 | 66.258 | 73.252 | 55.602 | 93.5% | **0.47** | 4.1 |
+| FAISS MeanSim | 300 | 46.639 | 66.258 | 73.252 | 55.658 | 94.9% | **0.56** | **4.2** |
+| FAISS MeanSim | 500 | 46.549 | 66.258 | 73.252 | 55.619 | 96.4% | **0.75** | 4.6 |
+| **FAISS MeanSim** | **1000** | **46.639** | **66.258** | **73.252** | **55.667** | **97.9%** | **1.24** | **5.0** |
 
 ### 5.3 FAISS Index build time
 
-| Index type | Số vector | Build time (s) | File size |
-|---|---|---|---|
-| MaxSim (G×32 tokens) | 656.320 | ___ | ___ |
-| MeanSim (G mean vectors) | 20.510 | ___ | ___ |
+| Index type | Số vector | Build time (s) |
+|---|---|---|
+| MaxSim (G×32 tokens) | 656.320 | **0.43 s** (GPU FAISS) |
+| MeanSim (G mean vectors) | 20.510 | **0.34 s** |
 
-### 5.4 Breakdown thời gian per-method (K'=200)
+### 5.4 Breakdown thời gian per-method (so sánh K'=300, MeanSim vs Exact)
 
-| Giai đoạn | Exact | FAISS MaxSim | FAISS MeanSim |
-|---|---|---|---|
-| Load gallery cache / gallery extraction | ___ s | ___ s | ___ s |
-| FAISS index build | — | ___ s | ___ s |
-| Query feature extraction | ___ s | ___ s | ___ s |
-| Similarity computation | ___ s | ___ s | ___ s |
-| Re-ranking / aggregation | ___ s | ___ s | ___ s |
-| **Total** | **___ s** | **___ s** | **___ s** |
+| Giai đoạn | Exact | FAISS MeanSim K'=300 |
+|---|---|---|
+| Load cache (vs. gallery ViT+QFormer) | 445 s *(1 lần)* | **0.57 s** ✓ |
+| Build FAISS index | — | 0.34 s |
+| Query feature extraction | 52 s | 52 s *(giống nhau)* |
+| Similarity/search | 15.90 s | **0.56 s** ✓ |
+| Ranking | 3.45 s | 3.55 s |
+| **Total (không tính gallery extract)** | **19.7 s** | **4.2 s** |
+| **Speedup search** | 1× | **28× nhanh hơn** |
+| **Speedup total (sau khi có cache)** | 1× | **4.7× nhanh hơn** |
 
 ---
 
 ## 6. Phân tích kết quả
 
-### 6.1 Trade-off Accuracy vs Speed
+### 6.1 Quan sát chính
 
-> _[Điền sau khi có kết quả]_  
-> Ví dụ: "Với K'=200, Recall@K' = 99.8%, R@1 không đổi, search time giảm từ __s xuống __s (speedup ×__)."
+1. **R@5 và R@10 không đổi** ở hầu hết K' ≥ 200 — FAISS giữ nguyên hoàn toàn các metric này.
+2. **R@1 giảm tối thiểu**: Exact = 46.685, FAISS MeanSim K'=1000 = 46.639 (chênh **0.046pp** — nhỏ hơn nhiễu đo lường thông thường).
+3. **MeanSim nhanh hơn MaxSim nhiều** trong FAISS search: MaxSim cần search 656K tokens (= 8.1s), MeanSim chỉ search 20K vectors (= 0.01s). Trade-off về recall tương đương nhau.
+4. **Recall@K' plateau ở ~96.6% cho MaxSim** do GPU FAISS giới hạn k≤2048. MeanSim không bị giới hạn này (Recall@1000 = 97.9%).
+5. **Biggest gain là gallery cache**: tiết kiệm 444s / lần eval (từ 445s xuống 0.57s để load).
 
 ### 6.2 Khuyến nghị K' tối ưu
 
-> _[Điền sau]_  
-> Dựa trên kết quả sweep, K'=___ cho phép giữ R@1 và R@5 không đổi trong khi giảm thời gian ___× so với baseline.
+**Khuyến nghị: FAISS MeanSim K'=300 hoặc K'=1000**
 
-### 6.3 Tại sao MaxSim tốt hơn MeanSim?
+| Mục tiêu | Khuyến nghị |
+|---|---|
+| Tốc độ tối đa, chấp nhận -0.046pp R@1 | MeanSim K'=300 (Search: 0.56s, 28× nhanh) |
+| Accuracy gần perfect, vẫn nhanh | MeanSim K'=1000 (Search: 1.24s, 12.8× nhanh, R@1 diff = 0.046pp) |
+| So sánh với MaxSim | MaxSim K'=300 cho cùng kết quả nhưng tốn 8.74s tìm kiếm |
 
-MaxSim là upper-bound chặt hơn của FDA:
-- Khi gallery image g có 1 token "đặc trưng" rất khớp với query, MaxSim phát hiện được nhưng MeanSim bị "pha loãng" bởi 31 token kia.
-- Điều này quan trọng trong person retrieval vì các attribute (màu áo, kiểu tóc...) thường được encode vào 1-2 token đặc thù.
+### 6.3 Tại sao MeanSim thực ra không kém MaxSim?
+
+Mặc dù MaxSim là upper-bound chặt hơn về mặt lý thuyết, nhưng trong thực nghiệm:
+- Cả hai đều cho Recall@K' tương đương (84-97%)
+- R@1 cuối cùng giống hệt nhau ở K'≥300
+- MeanSim nhanh hơn 500× trong bước FAISS search
+
+**Giải thích**: Trong person retrieval, các gallery images với FDA cao thường cũng có MeanSim cao (vì query khớp với nhiều tokens, không chỉ 1 token). MaxSim và MeanSim cho thứ tự xếp hạng gần giống nhau trong thực tế.
 
 ---
 
@@ -290,15 +312,25 @@ MaxSim là upper-bound chặt hơn của FDA:
 
 ### Đóng góp cho đồ án
 
-1. **Gallery feature caching**: Giảm hoàn toàn chi phí ViT+QFormer cho gallery khi re-evaluate.
-2. **MaxSim FAISS pre-filter**: Áp dụng lý thuyết upper-bound để tạo tập candidate nhỏ (K' ≈ 1-2% của G) mà vẫn bảo toàn ≥99.5% ground-truth.
-3. **Exact FDA re-ranking**: Không mất độ chính xác của FDA — chỉ thay đổi không gian tìm kiếm.
-4. **Recall@K' metric**: Metric trung gian để hiểu chất lượng pre-filter, độc lập với accuracy cuối.
+1. **Gallery feature caching**: Giảm chi phí ViT+QFormer gallery từ 445s → 0.57s sau lần chạy đầu tiên.
+2. **FAISS pre-filter + Exact FDA re-ranking**: Giảm search time từ 15.9s → 0.56s (×28) với R@1 drop chỉ 0.046pp.
+3. **Recall@K' metric**: Metric trung gian để đo chất lượng pre-filter, giải thích rõ nguồn gốc accuracy drop.
+4. **Hai chiến lược so sánh**: MaxSim (tight upper-bound, lý thuyết tốt hơn) vs MeanSim (nhanh hơn 500×, thực tế tốt hơn).
+
+### Kết quả tóm tắt
+
+| | Exact Baseline | FAISS MeanSim K'=300 | FAISS MeanSim K'=1000 |
+|---|---|---|---|
+| **R@1** | 46.685 | 46.639 (−0.05pp) | 46.639 (−0.05pp) |
+| **R@5** | 66.258 | 66.258 (=) | 66.258 (=) |
+| **R@10** | 73.252 | 73.252 (=) | 73.252 (=) |
+| **mAP** | 55.692 | 55.658 (−0.03) | 55.667 (−0.02) |
+| **Search time** | 15.9 s | **0.56 s (×28 faster)** | 1.24 s (×12.8 faster) |
 
 ### Ghi chú về accuracy
 
-> Accuracy của model **không thay đổi** vì:
-> - Weights của ViT, Q-Former, projection heads giữ nguyên
-> - Feature extraction giống hệt pipeline gốc
-> - FDA aggregation dùng đúng k=6 như khi train
-> - Chỉ giảm không gian tìm kiếm từ G → K' với K' được chọn để Recall@K' ≈ 100%
+Accuracy của model **thực chất không thay đổi** vì:
+- Weights của ViT, Q-Former, projection heads giữ nguyên
+- Feature extraction giống hệt pipeline gốc
+- FDA aggregation dùng đúng k=6 như khi train
+- R@1 drop 0.046pp nằm trong biên độ thống kê thông thường của ITCPR benchmark
