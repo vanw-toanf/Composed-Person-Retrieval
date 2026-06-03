@@ -237,7 +237,7 @@ def build_html(
                           f'<span class="badge badge-cluster">#{rank_c+1} gần nhất</span> '
                           f'({n_in_cluster} ảnh)</div>')
 
-        for gidx in sample_idxs:
+        for gidx in sample_idxs.tolist():
             border = '#e74c3c' if gidx in gt_gidxs else '#ddd'
             b64 = img_to_base64(gallery_img_paths[gidx])
             title = f'gidx={gidx} {"[GT]" if gidx in gt_gidxs else ""}'
@@ -258,8 +258,8 @@ def build_html(
     candidate_gidxs = results['candidate_gidxs']
     faiss_scores    = results['faiss_scores']
     for rank_i in range(show_n):
-        gidx  = candidate_gidxs[rank_i]
-        score = faiss_scores[rank_i]
+        gidx  = int(candidate_gidxs[rank_i])
+        score = float(faiss_scores[rank_i])
         is_gt = gidx in gt_gidxs
         border = '#e74c3c' if is_gt else '#aaa'
         b64 = img_to_base64(gallery_img_paths[gidx])
@@ -284,7 +284,7 @@ def build_html(
                       '</p>')
 
     for rank_i in range(min(10, len(final_gidxs))):
-        gidx  = final_gidxs[rank_i]
+        gidx  = int(final_gidxs[rank_i])
         score = float(final_scores[rank_i])
         is_gt = gidx in gt_gidxs
         border = '#e74c3c' if is_gt else '#4a90e2'
