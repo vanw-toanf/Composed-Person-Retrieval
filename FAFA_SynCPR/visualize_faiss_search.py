@@ -140,9 +140,9 @@ def run_single_query(
     fda_scores = top_vals.mean(dim=-1).cpu()        # [K']
 
     # sort by FDA
-    order = torch.argsort(fda_scores, descending=True)
-    final_gidxs  = candidate_gidxs[order.numpy()].astype(np.int64)
-    final_scores = fda_scores[order]
+    order = torch.argsort(fda_scores, descending=True).numpy()
+    final_gidxs  = candidate_gidxs[order].ravel().astype(np.int64)  # [K'] 1D
+    final_scores = fda_scores[torch.from_numpy(order)]
 
     # ── Cluster assignments ───────────────────────────────────────────────
     cluster_assignments = index.get_cluster_assignments()  # [G]
@@ -275,7 +275,7 @@ def build_html(
     # ── 4. Top-10 sau exact FDA re-ranking ───────────────────────────────
     final_gidxs  = results['final_gidxs']
     final_scores = results['final_scores']
-    candidate_set = set(candidate_gidxs.tolist())
+    candidate_set = {int(x) for x in candidate_gidxs}
 
     html_parts.append('<div class="section"><h3>4. Top-10 sau Exact FDA Re-ranking</h3>')
     html_parts.append('<p style="color:#888;font-size:13px">'
@@ -299,7 +299,7 @@ def build_html(
 
     # Có GT trong candidates không?
     gt_in_cands = gt_gidxs & candidate_set
-    gt_in_top10 = gt_gidxs & set(final_gidxs[:10].tolist())
+    gt_in_top10 = gt_gidxs & {int(x) for x in final_gidxs[:10]}
     html_parts.append(f'<p style="margin-top:8px;font-size:13px">'
                       f'GT images: {len(gt_gidxs)} total &nbsp;|&nbsp; '
                       f'{len(gt_in_cands)} trong K\'={K_prime} candidates &nbsp;|&nbsp; '
