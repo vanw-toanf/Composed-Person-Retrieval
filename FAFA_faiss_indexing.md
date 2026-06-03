@@ -135,7 +135,86 @@ inference_indexed.py                     │
 
 ---
 
-## 4. Hướng dẫn chạy trên server
+## 4. Chi tiết xây dựng và sử dụng FAISS Index
+
+### 4.1 Index được build từ cái gì?
+
+Sau khi load `gallery_cache.pt`, gallery features `gfeats [G, 32, 256]` được biến đổi thành vectors rồi nạp vào FAISS:
+
+```
+gfeats [G, 32, 256]   (load từ gallery_cache.pt)
+        │
+        ├── MeanSim: mean(dim=1) → [G, 256]       (1 vector đại diện / gallery image)
+        │
+        └── MaxSim:  reshape    → [G×32, 256]     (tất cả 32 token / gallery image)
+                                       │
+                          faiss.IndexFlatIP(256)   ← tạo index
+                          index.add(vectors)       ← nạp vectors vào
+```
+
+**Code tương ứng** — [src/faiss_retrieval.py](FAFA_SynCPR/src/faiss_retrieval.py#L74):
+```python
+self.index = faiss.IndexFlatIP(self.d)   # IndexFlatIP = exact inner product search
+self.index.add(tokens)                   # nạp [G, 256] hoặc [G*32, 256] vào index
+```
+
+`IndexFlatIP` là loại index **exact** (không xấp xỉ) — so sánh query với **toàn bộ** vectors trong index, trả về top-K' chính xác nhất theo inner product (= cosine vì đã L2-normalize).
+
+---
+
+### 4.2 Index được dùng ở đâu trong pipeline?
+
+Khi có query features `qfeats [Q, 256]`, gọi `index.search()` để tìm K' gallery candidates:
+
+```
+qfeats [Q, 256]
+        │
+        ▼
+index.search(qfeats, n_tokens)
+        │
+        ├── distances [Q, n_tokens]     — similarity scores
+        └── token_indices [Q, n_tokens] — vị trí trong flat array
+
+        ↓ (chỉ với MaxSim: gom token → gallery ID)
+
+candidates [Q, K']   — chỉ số K' gallery images / query
+```
+
+**Code tương ứng** — [src/faiss_retrieval.py](FAFA_SynCPR/src/faiss_retrieval.py#L111):
+```python
+distances, token_indices = self.index.search(qfeats, n_tokens_per_query)
+# → distances[q, n]     = similarity score của token thứ n với query q
+# → token_indices[q, n] = vị trí trong flat array [G*32] hoặc [G]
+```
+
+---
+
+### 4.3 Vị trí trong toàn bộ pipeline
+
+```
+cache_gallery.py          gfeats [G, 32, 256]
+                                    │
+                          ┌─────────▼──────────┐
+                          │   BUILD INDEX       │  faiss.IndexFlatIP.add()
+                          │   MeanSim: [G, 256] │  ← chạy 1 lần khi khởi động
+                          └─────────┬──────────┘
+                                    │ index sẵn sàng
+                          ┌─────────▼──────────┐
+                          │   SEARCH INDEX      │  index.search(qfeats, K')
+                          │   → candidates      │  ← chạy mỗi lần có query
+                          └─────────┬──────────┘
+                                    │
+                          ┌─────────▼──────────┐
+                          │  Exact FDA rerank   │  chỉ trên K' candidates
+                          │  → similarity [Q,G] │
+                          └─────────┬──────────┘
+                                    │
+                          rank() → R@1, R@5, R@10
+```
+
+---
+
+## 5. Hướng dẫn chạy trên server
 
 ### Môi trường
 
