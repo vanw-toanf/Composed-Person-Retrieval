@@ -253,16 +253,6 @@ top-k scores: [Q, G, 6]   (6 token tương đồng nhất)
 similarity:   [Q, G]      (1 giá trị tổng hợp / cặp query-gallery)
 ```
 
-**Các phương pháp aggregation khác** (đã implement, dùng cho so sánh):
-
-| Method | Công thức | Shape output |
-|---|---|---|
-| `aggregate_topk(k)` | mean của top-k scores | [Q, G] |
-| `aggregate_max` | max over 32 tokens | [Q, G] |
-| `aggregate_threshold` | mean của tokens > mean_sim | [Q, G] |
-| `aggregate_entropy(k_min, k_max)` | k động theo entropy | [Q, G] |
-| `aggregate_attention(T)` | softmax-weighted sum | [Q, G] |
-
 ---
 
 ## BƯỚC 5 — Ranking & Metrics
@@ -488,17 +478,6 @@ Mức độ dễ → khó, tác động thực tế:
 
 ---
 
-## Lưu ý khi test trên máy cá nhân (môi trường py3.12)
 
-```bash
-conda activate /home/vantoan/anaconda3/envs/py3.12
-cd /home/vantoan/Git/Composed_Person_Retrieval/FAFA_SynCPR
-
-# Cài thêm nếu chưa có
-pip install faiss-cpu   # hoặc faiss-gpu nếu có CUDA
-
-# Khi test không có GPU: thêm --device cpu
-# Khi RAM hạn chế: giảm batch_size, dùng chunk_size nhỏ cho entropy method
-```
 
 > **Không cần train lại:** Toàn bộ các tối ưu trên đều là **post-hoc indexing** — chỉ thay đổi cách tìm kiếm trong gallery, không thay đổi model weights.
