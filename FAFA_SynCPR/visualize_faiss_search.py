@@ -126,10 +126,10 @@ def run_single_query(
     nearest_cluster_ids = index.get_nearest_clusters(q_np, nprobe)  # [nprobe]
 
     # ── FAISS search → top-K' candidates ─────────────────────────────────
-    faiss_scores, candidate_gidxs = index.search(q_np, K_prime=K_prime)
-    # candidate_gidxs: [1, K'], faiss_scores: [1, K']
-    candidate_gidxs = candidate_gidxs[0]   # [K']
-    faiss_scores    = faiss_scores[0]       # [K']
+    candidate_gidxs, faiss_scores = index.search(q_np, K_prime=K_prime)
+    # candidate_gidxs: [1, K'] int64, faiss_scores: [1, K'] float32
+    candidate_gidxs = candidate_gidxs[0].astype(np.int64)  # [K']
+    faiss_scores    = faiss_scores[0]                        # [K']
 
     # ── Exact FDA re-ranking ─────────────────────────────────────────────
     gf_dev = gfeats.to(dev)
@@ -141,7 +141,7 @@ def run_single_query(
 
     # sort by FDA
     order = torch.argsort(fda_scores, descending=True)
-    final_gidxs  = candidate_gidxs[order.numpy()]
+    final_gidxs  = candidate_gidxs[order.numpy()].astype(np.int64)
     final_scores = fda_scores[order]
 
     # ── Cluster assignments ───────────────────────────────────────────────
