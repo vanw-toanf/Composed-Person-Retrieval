@@ -177,52 +177,117 @@ class MaxSimIndex:
 
 
 # ---------------------------------------------------------------------------
-# MeanSim FAISS Index  (đơn giản hơn, dùng so sánh)
+# MeanSim FAISS Index — hỗ trợ cả IndexFlatIP và IndexIVFFlat
 # ---------------------------------------------------------------------------
 
 class MeanSimIndex:
     """
     Mean-pool gallery: mỗi image → 1 vector [256], index [G, 256].
-    Đơn giản, nhanh build, nhưng kém chính xác hơn MaxSim khi gallery đa dạng.
+
+    Hai loại index:
+      IndexFlatIP  (use_ivf=False): exact search, luôn đúng, O(G) per query.
+      IndexIVFFlat (use_ivf=True) : approximate search, chia G vectors thành
+          nlist=100 cụm (bằng k-means), mỗi query chỉ search nprobe cụm gần nhất.
+          → nprobe nhỏ = nhanh hơn nhưng có thể bỏ sót candidate.
+          → nprobe = nlist = tương đương exact search.
+
+    Tại sao IVFFlat nhanh hơn:
+      Thay vì so sánh query với tất cả G=20.510 vectors, IVFFlat chỉ so sánh
+      với ~(nprobe/nlist * G) vectors trong nprobe cụm gần nhất.
+      Ví dụ nprobe=5/nlist=100 → chỉ xét 5% gallery = ~1.025 vectors.
     """
 
-    def __init__(self, gfeats: torch.Tensor, gids: torch.Tensor, use_gpu: bool = True):
+    def __init__(
+        self,
+        gfeats: torch.Tensor,   # [G, 32, 256]
+        gids: torch.Tensor,     # [G]
+        use_ivf: bool = True,   # True = IndexIVFFlat, False = IndexFlatIP (exact)
+        nlist: int = 100,       # số cụm k-means (chỉ dùng khi use_ivf=True)
+        nprobe: int = 10,       # số cụm search mỗi query (mặc định, có thể đổi sau)
+        use_gpu: bool = False,  # IVFFlat trên GPU phức tạp hơn, dùng CPU mặc định
+    ):
         assert FAISS_AVAILABLE
         self.G = gfeats.shape[0]
         self.d = gfeats.shape[2]
         self.gfeats_cpu = gfeats.cpu().float()
         self.gids = gids.cpu()
+        self.use_ivf = use_ivf
+        self.nlist = nlist
 
         # Mean-pool: [G, 32, 256] → [G, 256], re-normalize
         mean_feats = gfeats.cpu().float().mean(dim=1)
-        mean_feats = F.normalize(mean_feats, dim=-1).numpy()  # [G, 256]
+        mean_feats = F.normalize(mean_feats, dim=-1).numpy().astype(np.float32)
 
-        self.index = faiss.IndexFlatIP(self.d)
-        if use_gpu and faiss.get_num_gpus() > 0:
-            res = faiss.StandardGpuResources()
-            self.index = faiss.index_cpu_to_gpu(res, 0, self.index)
         t0 = time.time()
-        self.index.add(mean_feats.astype(np.float32))
-        print(f"[MeanSimIndex] Index built in {time.time()-t0:.1f}s  (G={self.G})")
+        if use_ivf:
+            # IndexIVFFlat: cần train trước (k-means để tạo nlist cụm)
+            quantizer = faiss.IndexFlatIP(self.d)
+            self.index = faiss.IndexIVFFlat(quantizer, self.d, nlist,
+                                            faiss.METRIC_INNER_PRODUCT)
+            self.index.train(mean_feats)   # học cấu trúc cụm từ gallery
+            self.index.add(mean_feats)     # nạp vectors vào các cụm
+            self.index.nprobe = nprobe     # số cụm search mỗi query
+            kind = f"IndexIVFFlat(nlist={nlist}, nprobe={nprobe})"
+        else:
+            self.index = faiss.IndexFlatIP(self.d)
+            self.index.add(mean_feats)
+            kind = "IndexFlatIP (exact)"
+
+        print(f"[MeanSimIndex] {kind}  built in {time.time()-t0:.2f}s  (G={self.G})")
+
+    def set_nprobe(self, nprobe: int):
+        """Đổi nprobe mà không cần build lại index."""
+        if self.use_ivf:
+            self.index.nprobe = nprobe
+        else:
+            print("[MeanSimIndex] Cảnh báo: index là FlatIP, không có nprobe.")
+
+    def get_cluster_assignments(self) -> np.ndarray:
+        """
+        Trả về cluster ID của từng gallery image, shape [G].
+        Chỉ dùng được khi use_ivf=True.
+        """
+        assert self.use_ivf, "Chỉ IVFFlat mới có cluster assignments."
+        mean_feats = self.gfeats_cpu.float().mean(dim=1)
+        mean_feats = F.normalize(mean_feats, dim=-1).numpy().astype(np.float32)
+        # quantizer là IndexFlatIP lưu nlist centroids
+        _, cluster_ids = self.index.quantizer.search(mean_feats, 1)  # [G, 1]
+        return cluster_ids.flatten()  # [G]
+
+    def get_nearest_clusters(self, q_feat: np.ndarray, nprobe: int) -> np.ndarray:
+        """
+        Trả về nprobe cluster IDs gần query nhất, shape [nprobe].
+        q_feat: [256] hoặc [1, 256]
+        """
+        assert self.use_ivf
+        q = q_feat.reshape(1, -1).astype(np.float32)
+        _, cluster_ids = self.index.quantizer.search(q, nprobe)  # [1, nprobe]
+        return cluster_ids[0]  # [nprobe]
 
     def search(
         self,
         qfeats: np.ndarray,  # [Q, 256]
         K_prime: int = 200,
+        nprobe: Optional[int] = None,   # override nprobe tạm thời nếu cần
         **kwargs,
     ) -> Tuple[np.ndarray, np.ndarray]:
         """Returns candidate_gidxs [Q, K'] and meansim_scores [Q, K']."""
+        if nprobe is not None and self.use_ivf:
+            self.index.nprobe = nprobe
         distances, candidate_gidxs = self.index.search(qfeats.astype(np.float32), K_prime)
         return candidate_gidxs, distances
 
     def save(self, path: str):
-        cpu_index = faiss.index_gpu_to_cpu(self.index) if hasattr(self.index, 'getDevice') else self.index
-        faiss.write_index(cpu_index, path + ".faissindex")
-        torch.save({'gfeats': self.gfeats_cpu, 'gids': self.gids, 'G': self.G, 'd': self.d}, path + "_meta.pt")
+        faiss.write_index(self.index, path + ".faissindex")
+        torch.save({
+            'gfeats': self.gfeats_cpu, 'gids': self.gids,
+            'G': self.G, 'd': self.d,
+            'use_ivf': self.use_ivf, 'nlist': self.nlist,
+        }, path + "_meta.pt")
         print(f"[MeanSimIndex] Saved to {path}.*")
 
     @classmethod
-    def load(cls, path: str, use_gpu: bool = True):
+    def load(cls, path: str, use_gpu: bool = False):
         assert FAISS_AVAILABLE
         obj = cls.__new__(cls)
         meta = torch.load(path + "_meta.pt", map_location='cpu')
@@ -230,10 +295,9 @@ class MeanSimIndex:
         obj.gids = meta['gids']
         obj.G = meta['G']
         obj.d = meta['d']
+        obj.use_ivf = meta.get('use_ivf', False)
+        obj.nlist = meta.get('nlist', 100)
         obj.index = faiss.read_index(path + ".faissindex")
-        if use_gpu and faiss.get_num_gpus() > 0:
-            res = faiss.StandardGpuResources()
-            obj.index = faiss.index_cpu_to_gpu(res, 0, obj.index)
         print(f"[MeanSimIndex] Loaded from {path}.*  (G={obj.G})")
         return obj
 
@@ -298,6 +362,57 @@ def fda_rerank(
         similarity[q_start:q_end].scatter_(1, cand_batch, scores)
 
     return similarity.cpu()  # [Q, G]
+
+
+# ---------------------------------------------------------------------------
+# Single-query exact search (dùng cho per-query latency benchmark)
+# ---------------------------------------------------------------------------
+
+def exact_search_single(
+    q_feat: torch.Tensor,      # [256]
+    gfeats_full: torch.Tensor, # [G, 32, 256]
+    fda_k: int = 6,
+    device: str = 'cuda',
+) -> torch.Tensor:             # [G] scores
+    """
+    Tính FDA score cho 1 query với toàn bộ gallery (brute-force).
+    Dùng để đo per-query latency của baseline.
+    """
+    dev = torch.device(device if torch.cuda.is_available() else 'cpu')
+    q = q_feat.to(dev).unsqueeze(0).unsqueeze(0)  # [1, 1, 256]
+    gf = gfeats_full.to(dev)                       # [G, 32, 256]
+
+    # [1, 1, 256] × [G, 256, 32] → [G, 32]
+    sim = torch.matmul(q, gf.permute(0, 2, 1)).squeeze(0)  # [G, 32]
+    top_vals, _ = torch.topk(sim, k=fda_k, dim=-1)
+    return top_vals.mean(dim=-1).cpu()  # [G]
+
+
+def faiss_search_single(
+    q_feat: torch.Tensor,          # [256]
+    gfeats_full: torch.Tensor,     # [G, 32, 256]
+    index,                          # MeanSimIndex
+    K_prime: int,
+    fda_k: int = 6,
+    device: str = 'cuda',
+) -> torch.Tensor:                 # [K'] scores (chỉ trả candidates)
+    """
+    FAISS search + exact FDA rerank cho 1 query.
+    Dùng để đo per-query latency của FAISS approach.
+    """
+    dev = torch.device(device if torch.cuda.is_available() else 'cpu')
+    q_np = q_feat.numpy().reshape(1, -1).astype(np.float32)
+
+    # FAISS: tìm K' candidates
+    cand_idxs, _ = index.search(q_np, K_prime=K_prime)  # [1, K']
+    cand_idxs = cand_idxs[0]  # [K']
+
+    # Exact FDA trên K' candidates
+    cand_feats = gfeats_full[cand_idxs].to(dev)   # [K', 32, 256]
+    q = q_feat.to(dev).unsqueeze(0)               # [1, 256]
+    sim = torch.matmul(q, cand_feats.permute(0, 2, 1)).squeeze(0)  # [K', 32]
+    top_vals, _ = torch.topk(sim, k=fda_k, dim=-1)
+    return top_vals.mean(dim=-1).cpu()  # [K'] scores
 
 
 # ---------------------------------------------------------------------------

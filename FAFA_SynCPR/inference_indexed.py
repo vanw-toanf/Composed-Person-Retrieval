@@ -55,7 +55,10 @@ from validate_blip import (
     batchwise_similarity,
     aggregate_topk,
 )
-from faiss_retrieval import MaxSimIndex, MeanSimIndex, fda_rerank, compute_recall_at_K
+from faiss_retrieval import (
+    MaxSimIndex, MeanSimIndex, fda_rerank, compute_recall_at_K,
+    exact_search_single, faiss_search_single,
+)
 from utils import collate_fn
 
 
@@ -211,6 +214,154 @@ def run_indexed(
 
 
 # ---------------------------------------------------------------------------
+# Per-query latency benchmark
+# ---------------------------------------------------------------------------
+
+def run_per_query_timing(
+    model,
+    query_set,
+    txt_processors,
+    gfeats: torch.Tensor,
+    index,
+    k_candidates: int,
+    fda_k: int,
+    device: str,
+    n_samples: int = 50,
+    exact_baseline: bool = True,
+    strategy: str = 'mean',
+    nprobe_list=None,
+):
+    """
+    Đo latency cho 1 query đơn lẻ (như production: 1 ảnh + 1 text → tìm ảnh đích).
+
+    Gồm 2 giai đoạn được đo riêng:
+      1. Query feature extraction: ViT + Q-Former (giống nhau cho mọi method)
+      2. Search: exact brute-force  vs  FAISS IVF + exact rerank
+
+    n_samples: số query ngẫu nhiên để lấy trung bình (loại bỏ CUDA warmup).
+    """
+    import random
+    dev = torch.device(device if torch.cuda.is_available() else 'cpu')
+
+    # Chọn ngẫu nhiên n_samples query
+    indices = random.sample(range(len(query_set)), min(n_samples + 5, len(query_set)))
+
+    # Preload data (tránh tính I/O vào latency)
+    samples = []
+    for idx in indices:
+        iid, img, caption = query_set[idx]
+        samples.append((iid, img, caption))
+
+    print("\n" + "="*65)
+    print(f"PER-QUERY LATENCY BENCHMARK  (n_samples={n_samples})")
+    print(f"Mô phỏng production: 1 query → tìm ảnh đích trong {gfeats.shape[0]} gallery")
+    print("="*65)
+
+    gfeats_dev = gfeats.to(dev)
+
+    # Warmup GPU
+    print("Warming up GPU...", end=' ')
+    _img = samples[0][1].unsqueeze(0).to(dev)
+    _cap = [txt_processors["eval"](samples[0][2][0] if isinstance(samples[0][2], list) else samples[0][2])]
+    with torch.no_grad():
+        _ = model.extract_features({"image": _img, "text_input": _cap})
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
+    print("done")
+
+    extract_times, exact_times, faiss_times = [], [], {}
+    if nprobe_list:
+        for np_ in nprobe_list:
+            faiss_times[np_] = []
+
+    for i, (iid, img, caption) in enumerate(samples[1: n_samples + 1]):
+        img_batch = img.unsqueeze(0).to(dev)
+        cap = caption[0] if isinstance(caption, (list, tuple)) else caption
+        cap = [txt_processors["eval"](cap)]
+
+        # ── 1. Query feature extraction ──────────────────────────────────────
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+        t0 = time.perf_counter()
+        with torch.no_grad():
+            out = model.extract_features({"image": img_batch, "text_input": cap})
+            q_feat = out.multimodal_embeds.squeeze(0).cpu()  # [256]
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+        extract_times.append(time.perf_counter() - t0)
+
+        # ── 2a. Exact search (brute-force) ───────────────────────────────────
+        if exact_baseline:
+            if torch.cuda.is_available():
+                torch.cuda.synchronize()
+            t0 = time.perf_counter()
+            _ = exact_search_single(q_feat, gfeats_dev, fda_k=fda_k, device=device)
+            if torch.cuda.is_available():
+                torch.cuda.synchronize()
+            exact_times.append(time.perf_counter() - t0)
+
+        # ── 2b. FAISS + exact rerank (với từng nprobe) ───────────────────────
+        if nprobe_list and hasattr(index, 'use_ivf') and index.use_ivf:
+            for np_ in nprobe_list:
+                index.set_nprobe(np_)
+                t0 = time.perf_counter()
+                _ = faiss_search_single(q_feat, gfeats_dev, index,
+                                        K_prime=k_candidates,
+                                        fda_k=fda_k, device=device)
+                faiss_times[np_].append(time.perf_counter() - t0)
+        elif not nprobe_list:
+            # IndexFlatIP hoặc IVF với 1 nprobe mặc định
+            t0 = time.perf_counter()
+            _ = faiss_search_single(q_feat, gfeats_dev, index,
+                                    K_prime=k_candidates,
+                                    fda_k=fda_k, device=device)
+            faiss_times.setdefault('default', []).append(time.perf_counter() - t0)
+
+    # ── In kết quả ───────────────────────────────────────────────────────────
+    def stats(lst):
+        a = np.array(lst) * 1000  # → ms
+        return a.mean(), np.percentile(a, 50), np.percentile(a, 95)
+
+    print(f"\n{'Giai đoạn':<40} {'Mean':>8} {'P50':>8} {'P95':>8}")
+    print("-" * 65)
+
+    e_mean, e_p50, e_p95 = stats(extract_times)
+    print(f"{'Query extraction (ViT+QFormer)':<40} {e_mean:>7.1f}ms {e_p50:>7.1f}ms {e_p95:>7.1f}ms")
+    print(f"  (giống nhau cho mọi method, không thể tránh)")
+
+    if exact_times:
+        s_mean, s_p50, s_p95 = stats(exact_times)
+        print(f"\n{'Exact search (brute-force, G=20510)':<40} {s_mean:>7.1f}ms {s_p50:>7.1f}ms {s_p95:>7.1f}ms")
+        total_mean = e_mean + s_mean
+        print(f"{'  → Total per-query (exact)':<40} {total_mean:>7.1f}ms")
+
+    if nprobe_list and faiss_times:
+        print()
+        for np_ in nprobe_list:
+            times = faiss_times.get(np_, [])
+            if not times:
+                continue
+            f_mean, f_p50, f_p95 = stats(times)
+            label = f"FAISS IVF nprobe={np_}, K'={k_candidates}"
+            print(f"{label:<40} {f_mean:>7.1f}ms {f_p50:>7.1f}ms {f_p95:>7.1f}ms")
+            if exact_times:
+                speedup = s_mean / f_mean if f_mean > 0 else float('inf')
+                total_faiss = e_mean + f_mean
+                print(f"  → Search speedup vs exact: ×{speedup:.1f}  |  Total per-query: {total_faiss:.1f}ms")
+    elif 'default' in faiss_times:
+        times = faiss_times['default']
+        f_mean, f_p50, f_p95 = stats(times)
+        label = f"FAISS {strategy} K'={k_candidates}"
+        print(f"\n{label:<40} {f_mean:>7.1f}ms {f_p50:>7.1f}ms {f_p95:>7.1f}ms")
+        if exact_times:
+            speedup = s_mean / f_mean if f_mean > 0 else float('inf')
+            total_faiss = e_mean + f_mean
+            print(f"  → Search speedup vs exact: ×{speedup:.1f}  |  Total per-query: {total_faiss:.1f}ms")
+
+    print("="*65)
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -231,9 +382,9 @@ def main():
     parser.add_argument('--device',        default='cuda')
 
     # FAISS options
-    parser.add_argument('--strategy',      default='maxsim', choices=['maxsim', 'mean'],
-                        help='maxsim: index G*32 tokens (tighter); mean: index mean-pooled (simpler)')
-    parser.add_argument('--k-candidates',  type=int, default=200,
+    parser.add_argument('--strategy',      default='mean', choices=['maxsim', 'mean'],
+                        help='maxsim: index G*32 tokens (tighter); mean: index mean-pooled (simpler, recommended)')
+    parser.add_argument('--k-candidates',  type=int, default=300,
                         help='K\' — số gallery candidates / query')
     parser.add_argument('--sweep-k',       type=str, default=None,
                         help='Sweep nhiều K\': ví dụ "50,100,200,500,1000" (bỏ qua --k-candidates)')
@@ -242,9 +393,26 @@ def main():
     parser.add_argument('--load-index',    type=str, default=None,
                         help='Load FAISS index đã build sẵn từ file prefix')
 
+    # IVFFlat options
+    parser.add_argument('--use-ivf',       action='store_true', default=True,
+                        help='Dùng IndexIVFFlat thay vì IndexFlatIP (mặc định: True)')
+    parser.add_argument('--no-ivf',        dest='use_ivf', action='store_false',
+                        help='Dùng IndexFlatIP (exact, không cần nprobe)')
+    parser.add_argument('--nlist',         type=int, default=100,
+                        help='Số cụm k-means cho IVFFlat (mặc định: 100)')
+    parser.add_argument('--nprobe',        type=int, default=10,
+                        help='Số cụm search mỗi query cho IVFFlat (mặc định: 10)')
+    parser.add_argument('--sweep-nprobe',  type=str, default=None,
+                        help='Sweep nhiều nprobe: ví dụ "3,5,7,10" — dùng với --per-query-timing')
+
     # Baseline
     parser.add_argument('--exact-baseline', action='store_true',
                         help='Cũng chạy exact brute-force để so sánh thời gian')
+
+    # Per-query latency
+    parser.add_argument('--per-query-timing', type=int, default=0, metavar='N',
+                        help='Đo latency cho 1 query đơn lẻ (production scenario). '
+                             'N = số query dùng để lấy trung bình (vd: 50)')
 
     args = parser.parse_args()
 
@@ -299,12 +467,19 @@ def main():
         t_index_build = time.time() - t0
         print(f"  Index loaded in {t_index_build:.2f}s")
     else:
-        print(f"\nBuilding {args.strategy.upper()} FAISS index...")
+        ivf_label = f"IVFFlat(nlist={args.nlist}, nprobe={args.nprobe})" if args.use_ivf else "FlatIP(exact)"
+        print(f"\nBuilding {args.strategy.upper()} FAISS index [{ivf_label}]...")
         t0 = time.time()
         if args.strategy == 'maxsim':
             index = MaxSimIndex(gfeats, gids, use_gpu=use_gpu)
         else:
-            index = MeanSimIndex(gfeats, gids, use_gpu=use_gpu)
+            index = MeanSimIndex(
+                gfeats, gids,
+                use_ivf=args.use_ivf,
+                nlist=args.nlist,
+                nprobe=args.nprobe,
+                use_gpu=False,  # IVFFlat dùng CPU để tránh phức tạp GPU
+            )
         t_index_build = time.time() - t0
         print(f"  Index built in {t_index_build:.2f}s")
 
@@ -347,6 +522,9 @@ def main():
     else:
         k_list = [args.k_candidates]
 
+    # ── Collect nprobe values to sweep (batch evaluation) ────────────────────
+    nprobe_list = [int(x) for x in args.sweep_nprobe.split(',')] if args.sweep_nprobe else [args.nprobe]
+
     all_results = []
 
     # ── Exact baseline ────────────────────────────────────────────────────────
@@ -371,52 +549,75 @@ def main():
             'recall_at_K': 1.0,
         })
 
-    # ── FAISS sweep ───────────────────────────────────────────────────────────
+    # ── FAISS sweep (K' × nprobe) ─────────────────────────────────────────────
     for K_prime in k_list:
-        print("\n" + "="*60)
-        print(f"FAISS {args.strategy.upper()}  K'={K_prime}  (strategy={args.strategy})")
-        print("="*60)
-        t_total = time.time()
-        R1, R5, R10, mAP, mINP, timings_f = run_indexed(
-            index=index,
+        for nprobe in nprobe_list:
+            # Đổi nprobe trước mỗi lần chạy
+            if args.strategy == 'mean' and hasattr(index, 'set_nprobe'):
+                index.set_nprobe(nprobe)
+                np_label = f"nprobe={nprobe}" if args.use_ivf else "FlatIP"
+            else:
+                np_label = ""
+
+            label = f"FAISS-{args.strategy} K'={K_prime}" + (f" {np_label}" if np_label else "")
+            print("\n" + "="*60)
+            print(label)
+            print("="*60)
+            t_total = time.time()
+            R1, R5, R10, mAP, mINP, timings_f = run_indexed(
+                index=index,
+                gfeats=gfeats,
+                gids=gids,
+                qids=qids,
+                qfeats=qfeats,
+                K_prime=K_prime,
+                fda_k=fda_k,
+                device=str(device),
+            )
+            elapsed_total = time.time() - t_total
+            elapsed_search = timings_f['faiss_search'] + timings_f['exact_rerank']
+            print_metrics(label, R1, R5, R10, mAP, mINP,
+                          elapsed_total=elapsed_total, elapsed_search=elapsed_search)
+            print(f"  Timings detail: {timings_f}")
+
+            all_results.append({
+                'method': f'FAISS-{args.strategy}',
+                'K_prime': K_prime,
+                'nprobe': nprobe if args.use_ivf else 'exact',
+                'R1': R1, 'R5': R5, 'R10': R10, 'mAP': mAP, 'mINP': mINP,
+                'total_sec': elapsed_total,
+                'search_sec': elapsed_search,
+                'recall_at_K': timings_f['recall_at_K'],
+                'timings': timings_f,
+            })
+
+    # ── Per-query latency benchmark ───────────────────────────────────────────
+    if args.per_query_timing > 0:
+        run_per_query_timing(
+            model=model,
+            query_set=query_set,
+            txt_processors=txt_processors,
             gfeats=gfeats,
-            gids=gids,
-            qids=qids,
-            qfeats=qfeats,
-            K_prime=K_prime,
+            index=index,
+            k_candidates=k_list[0],
             fda_k=fda_k,
             device=str(device),
+            n_samples=args.per_query_timing,
+            exact_baseline=args.exact_baseline,
+            strategy=args.strategy,
+            nprobe_list=[int(x) for x in args.sweep_nprobe.split(',')] if args.sweep_nprobe else None,
         )
-        elapsed_total = time.time() - t_total
-        elapsed_search = timings_f['faiss_search'] + timings_f['exact_rerank']
-        print_metrics(
-            f'FAISS-{args.strategy} K\'={K_prime}',
-            R1, R5, R10, mAP, mINP,
-            elapsed_total=elapsed_total,
-            elapsed_search=elapsed_search,
-        )
-        print(f"  Timings detail: {timings_f}")
-
-        all_results.append({
-            'method': f'FAISS-{args.strategy}',
-            'K_prime': K_prime,
-            'R1': R1, 'R5': R5, 'R10': R10, 'mAP': mAP, 'mINP': mINP,
-            'total_sec': elapsed_total,
-            'search_sec': elapsed_search,
-            'recall_at_K': timings_f['recall_at_K'],
-            'timings': timings_f,
-        })
 
     # ── Summary table ─────────────────────────────────────────────────────────
     if len(all_results) > 1:
         print("\n" + "="*72)
         print("TỔNG KẾT")
         print("="*72)
-        tbl = PrettyTable(['Method', 'K\'', 'R@1', 'R@5', 'R@10', 'mAP',
+        tbl = PrettyTable(['Method', 'K\'', 'nprobe', 'R@1', 'R@5', 'R@10', 'mAP',
                            'Recall@K\'', 'Search(s)', 'Total(s)'])
         for r in all_results:
             tbl.add_row([
-                r['method'], r['K_prime'],
+                r['method'], r.get('K_prime', '-'), r.get('nprobe', '-'),
                 f"{r['R1']:.3f}", f"{r['R5']:.3f}", f"{r['R10']:.3f}",
                 f"{r['mAP']:.3f}", f"{r['recall_at_K']*100:.1f}%",
                 f"{r['search_sec']:.2f}", f"{r['total_sec']:.1f}",
