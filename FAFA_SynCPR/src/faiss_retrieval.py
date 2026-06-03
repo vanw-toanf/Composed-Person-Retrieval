@@ -335,31 +335,38 @@ def fda_rerank(
     # Khởi tạo với score thấp → images ngoài candidates xếp cuối
     similarity = torch.full((Q, G), -1.0, device=dev)
 
-    cand_t = torch.from_numpy(candidate_gidxs).to(dev)  # [Q, K']
+    # FAISS IVFFlat trả về -1 khi nprobe cụm không đủ K' candidates.
+    # Thay -1 bằng 0 tạm thời, đặt score = -1.0, và sort để valid slots
+    # luôn được scatter SAU invalid → valid score không bị ghi đè.
+    cand_np = candidate_gidxs.copy()
+    valid_mask = (cand_np >= 0)        # [Q, K']
+    cand_np[~valid_mask] = 0           # index âm → 0 tạm thời
+    cand_t      = torch.from_numpy(cand_np).to(dev)         # [Q, K']
+    valid_t     = torch.from_numpy(valid_mask).to(dev)      # [Q, K']
 
     for q_start in range(0, Q, batch_size):
         q_end = min(q_start + batch_size, Q)
-        bq = q_end - q_start
 
-        q_batch   = qfeats[q_start:q_end]           # [bq, 256]
-        cand_batch = cand_t[q_start:q_end]           # [bq, K']
+        q_batch    = qfeats[q_start:q_end]          # [bq, 256]
+        cand_batch = cand_t[q_start:q_end]          # [bq, K']
+        valid      = valid_t[q_start:q_end]         # [bq, K']
 
-        # [bq, K', 32, 256] — advanced indexing
-        cand_feats = gfeats_full[cand_batch]         # [bq, K', 32, 256]
-
-        # dot product: q [bq,1,1,256] × cand_feats [bq, K', 256, 32]
-        q_exp = q_batch.unsqueeze(1).unsqueeze(1)    # [bq, 1, 1, 256]
+        cand_feats = gfeats_full[cand_batch]        # [bq, K', 32, 256]
+        q_exp = q_batch.unsqueeze(1).unsqueeze(1)   # [bq, 1, 1, 256]
         sim_qt = torch.matmul(
-            q_exp, cand_feats.permute(0, 1, 3, 2)   # [bq, K', 256, 32]
-        ).squeeze(2)                                  # [bq, K', 32]
+            q_exp, cand_feats.permute(0, 1, 3, 2)
+        ).squeeze(2)                                 # [bq, K', 32]
 
-        # FDA: top-k mean trên dim=-1
-        top_vals, _ = torch.topk(sim_qt, k=fda_k, dim=-1)  # [bq, K', fda_k]
-        scores = top_vals.mean(dim=-1)                       # [bq, K']
+        top_vals, _ = torch.topk(sim_qt, k=fda_k, dim=-1)
+        scores = top_vals.mean(dim=-1)               # [bq, K']
+        # Invalid slots nhận score = -1.0 (giống giá trị init)
+        scores = scores.masked_fill(~valid, -1.0)
 
-        # Ghi vào similarity matrix tại đúng gallery index
-        # scatter_ theo dim=1: similarity[q, cand_batch[q, k]] = scores[q, k]
-        similarity[q_start:q_end].scatter_(1, cand_batch, scores)
+        # Sort: invalid (0) trước, valid (1) sau → valid luôn ghi đè
+        order = valid.long().argsort(dim=-1, stable=True)   # [bq, K']
+        cand_sorted  = cand_batch.gather(1, order)
+        scores_sorted = scores.gather(1, order)
+        similarity[q_start:q_end].scatter_(1, cand_sorted, scores_sorted)
 
     return similarity.cpu()  # [Q, G]
 
