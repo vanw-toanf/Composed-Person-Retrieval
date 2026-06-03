@@ -392,6 +392,86 @@ scp -r -i ~/.ssh/id_rsa vanwtoanf@34.125.49.208:~/Composed_Person_Retrieval/FAFA
 
 ---
 
+## 7.5 Per-Query Latency — Phương pháp tốt nhất (FlatIP MeanSim K'=300)
+
+> Mô phỏng production: **1 query đơn lẻ** (1 ảnh reference + 1 text) → tìm ảnh đích.  
+> n=50 query, GPU warmup trước, đo mean / P50 / P95. Server: NVIDIA L4.
+
+| Giai đoạn | Mean | P50 | P95 | Ghi chú |
+|---|---|---|---|---|
+| Query extraction (ViT + Q-Former) | **54.7 ms** | 54.6 ms | 56.0 ms | Không thể tránh |
+| Exact search (brute-force, G=20510) | 3.0 ms | 3.0 ms | 3.1 ms | So sánh |
+| **FlatIP MeanSim K'=300** | **2.4 ms** | 2.4 ms | 2.5 ms | Phương pháp đề xuất |
+| → **Total per-query (exact)** | **57.7 ms** | | | |
+| → **Total per-query (FAISS)** | **57.1 ms** | | | |
+| Search speedup | — | — | — | **×1.3** |
+
+**Nhận xét quan trọng:**
+
+- Với **1 query đơn lẻ trên GPU mạnh**: speedup search chỉ ×1.3 (2.4ms → 3.0ms) vì GPU tận dụng tốt matmul lớn (20510×32×256).
+- Bottleneck thực sự là **query extraction (54.7ms = 96% tổng thời gian)** — đây là chi phí không thể tránh của model FAFA.
+- **FAISS có giá trị chính trong batch evaluation** (2202 queries cùng lúc): search giảm từ 15.8s → 0.9s (×17).
+
+So sánh hai kịch bản:
+
+| Kịch bản | Exact | FlatIP K'=300 | Speedup |
+|---|---|---|---|
+| Batch (2202 queries) | 15.8s search | 0.9s search | **×17** |
+| Single query (production) | 3.0ms search | 2.4ms search | ×1.3 |
+
+---
+
+## 7.6 Yêu cầu phần cứng và Hạn chế triển khai
+
+### Thực đo VRAM khi chạy 1 query
+
+| Component | VRAM |
+|---|---|
+| EVA-CLIP-G (ViT-G, fp16, ~1B params) + Q-Former (fp32) | **5.58 GB** |
+| Gallery features trên GPU [20510, 32, 256] fp32 | **0.67 GB** |
+| Peak khi chạy 1 query (forward pass) | **6.27 GB** |
+
+**→ Yêu cầu tối thiểu: GPU ≥ 8 GB VRAM** (6.27 GB + overhead CUDA + OS)
+
+### Khả năng chạy trên các cấu hình phần cứng
+
+| Cấu hình | Khả năng | Tốc độ ước tính |
+|---|---|---|
+| GPU ≥ 8 GB VRAM (RTX 3070+, L4, A100...) | ✅ Chạy tốt | ~57ms / query |
+| GPU 4–6 GB VRAM (GTX 1660, RTX 3050...) | ⚠️ OOM với gallery trên GPU | Chuyển gallery sang CPU |
+| GPU 4 GB (máy phổ thông) | ❌ OOM với model | Phải dùng CPU |
+| CPU only | ✅ Chạy được | ~1–3 giây / query (×20–50 chậm hơn) |
+
+**Lý do 4 GB không đủ:** EVA-CLIP-G là ViT-G (Giant) — backbone lớn nhất trong gia đình ViT, chiếm ~2 GB fp16 chỉ riêng weights. Cộng với Q-Former fp32 (~440 MB) và activations trong forward pass, tổng đã vượt 4 GB trước khi load gallery.
+
+### Phương pháp tối ưu của đề tài và phần cứng
+
+Các cải tiến trong đề tài (FAISS + gallery cache) **giảm thời gian tìm kiếm**, không giảm VRAM:
+
+```
+Bottleneck VRAM: model weights (5.58 GB) ← không thay đổi
+Bottleneck thời gian: query extraction (54.7ms) ← không thay đổi
+Cải tiến đề tài:  search time (3.0ms → 2.4ms single / 15.8s → 0.9s batch)
+```
+
+Đề tài tập trung đúng vào bottleneck **có thể tối ưu** trong phạm vi không train lại model.
+
+### Hướng phát triển: giảm yêu cầu phần cứng
+
+Nếu muốn triển khai trên GPU phổ thông (4–6 GB), cần các kỹ thuật nằm ngoài phạm vi đề tài này:
+
+| Kỹ thuật | Giảm VRAM | Tác động accuracy |
+|---|---|---|
+| fp16 cho Q-Former | 5.58 GB → ~5.1 GB | Rất nhỏ |
+| INT8 quantization (model) | ~5.58 GB → ~2.8 GB | Nhỏ (~0.5–1pp R@1) |
+| Knowledge distillation (model nhỏ hơn) | Giảm mạnh | Trung bình |
+| Gallery features trên CPU (không GPU) | Giải phóng 0.67 GB | Không đổi (chậm hơn ~5ms/query) |
+| Cắt batch_size gallery xuống 1 | ~5.6 GB (chỉ model) | Không đổi |
+
+Với **gallery features chuyển về CPU**, VRAM giảm xuống ~5.6 GB — vẫn chưa đủ cho 4 GB, nhưng nếu kết hợp INT8 quantization thì có thể triển khai trên GPU 6 GB.
+
+---
+
 ## 8. Phân tích kết quả
 
 ### 8.1 Quan sát chính (FlatIP)
