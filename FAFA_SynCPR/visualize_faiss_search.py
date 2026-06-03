@@ -168,22 +168,20 @@ def build_html(
     caption: str,
     results: dict,
     gallery_img_paths: list,
-    query_iid: int,
+    query_pid: int,          # person_id của query (dùng để tìm GT)
+    gallery_pids: list,      # person_ids của toàn bộ gallery
+    query_iid: int,          # instance_id (chỉ để hiển thị)
     nprobe: int,
     K_prime: int,
     top_n_show: int = 15,
     samples_per_cluster: int = 8,
 ) -> str:
 
-    gids = results['gids']
     cluster_assignments = results['cluster_assignments']
     nearest_cluster_ids = results['nearest_cluster_ids']
 
     # Ground-truth: gallery images có cùng person_id với query
-    # Trong ITCPR, instance_id dùng để match (gids = instance_ids)
-    # Query iid → tìm gallery images có iid/person_id giống
-    # Dùng xấp xỉ: tìm gallery image có gid == query_iid
-    gt_gidxs = set(np.where(gids.numpy() == query_iid)[0].tolist())
+    gt_gidxs = set(int(i) for i, pid in enumerate(gallery_pids) if pid == query_pid)
 
     # ── CSS ──────────────────────────────────────────────────────────────
     css = """
@@ -222,7 +220,7 @@ def build_html(
 
     # ── 2. Top-nprobe nearest clusters ───────────────────────────────────
     html_parts.append(f'<div class="section"><h3>2. Top-{nprobe} cụm gần nhất '
-                      f'(IVF nlist=100, mỗi cụm ~{len(gids)//100} ảnh)</h3>')
+                      f'(IVF nlist=100, mỗi cụm ~{len(gallery_pids)//100} ảnh)</h3>')
     html_parts.append('<p style="color:#888;font-size:13px">Mỗi cụm là một nhóm gallery images '
                       'có visual features tương đồng nhau (k-means clustering). '
                       'Query chỉ search trong các cụm này thay vì toàn bộ gallery.</p>')
@@ -406,6 +404,8 @@ def main():
             caption=cap_str,
             results=results,
             gallery_img_paths=gallery_img_paths,
+            query_pid=val_dataset.query['person_ids'][q_idx],
+            gallery_pids=val_dataset.gallery['person_ids'],
             query_iid=int(iid),
             nprobe=args.nprobe,
             K_prime=args.k_candidates,
