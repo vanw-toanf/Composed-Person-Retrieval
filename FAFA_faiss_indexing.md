@@ -219,20 +219,9 @@ cache_gallery.py          gfeats [G, 32, 256]
 ### Môi trường
 
 ```bash
-ssh -i ~/.ssh/id_rsa vanwtoanf@34.125.111.141
+ssh -i ~/.ssh/id_rsa vanwtoanf@34.125.49.208
 conda activate ~/miniconda3/envs/py3.12
 cd ~/Composed_Person_Retrieval/FAFA_SynCPR
-```
-
-### Cài FAISS (nếu chưa có)
-
-```bash
-# Với GPU (khuyến nghị, server có 24GB VRAM)
-conda install -c pytorch faiss-gpu -y
-
-# Hoặc pip
-pip install faiss-gpu
-# pip install faiss-cpu   # nếu không có GPU
 ```
 
 ### Bước 1: Cache gallery features (chạy 1 lần)
@@ -241,68 +230,115 @@ pip install faiss-gpu
 python cache_gallery.py \
     --exp-dir output/cpr/FAFA_experiment \
     --model-name tuned_recall_at1_step.pt \
-    --itcpr-root /path/to/ITCPR \
-    --batch-size 64 \
-    --device cuda \
-    --output gallery_cache.pt
+    --itcpr-root ~/Composed_Person_Retrieval/ITCPR \
+    --batch-size 64 --device cuda
 ```
 
-Output: `output/cpr/FAFA_experiment/gallery_cache.pt` (~640 MB)  
-Thời gian: ~2-5 phút (chạy ViT+QFormer cho 20K ảnh gallery)
-
-### Bước 2: Inference với FAISS (chạy mỗi lần evaluate)
-
-**Chạy 1 giá trị K':**
+### Bước 2: Inference — FlatIP (exact FAISS, sweep K')
 
 ```bash
 python inference_indexed.py \
     --exp-dir output/cpr/FAFA_experiment \
-    --itcpr-root /path/to/ITCPR \
+    --itcpr-root ~/Composed_Person_Retrieval/ITCPR \
     --gallery-cache gallery_cache.pt \
-    --strategy maxsim \
-    --k-candidates 200 \
-    --exact-baseline          # cũng chạy exact để so sánh
-```
-
-**Sweep nhiều K' để vẽ accuracy/speed curve:**
-
-```bash
-python inference_indexed.py \
-    --exp-dir output/cpr/FAFA_experiment \
-    --itcpr-root /path/to/ITCPR \
-    --gallery-cache gallery_cache.pt \
-    --strategy maxsim \
+    --strategy mean --no-ivf \
     --sweep-k "50,100,200,300,500,1000" \
     --exact-baseline
 ```
 
-**So sánh MaxSim vs MeanSim:**
+### Bước 3: Inference — IVFFlat (sweep nprobe)
 
 ```bash
-# MaxSim
-python inference_indexed.py ... --strategy maxsim --sweep-k "50,100,200,500"
-
-# MeanSim
-python inference_indexed.py ... --strategy mean   --sweep-k "50,100,200,500"
+python inference_indexed.py \
+    --exp-dir output/cpr/FAFA_experiment \
+    --itcpr-root ~/Composed_Person_Retrieval/ITCPR \
+    --gallery-cache gallery_cache.pt \
+    --strategy mean --use-ivf --nlist 100 \
+    --k-candidates 300 \
+    --sweep-nprobe "3,5,7,10" \
+    --exact-baseline \
+    --per-query-timing 50
 ```
 
-**Lưu FAISS index để lần sau không cần build lại:**
+### Bước 4: Visualization (1 query cụ thể)
 
 ```bash
-python inference_indexed.py ... --strategy maxsim --save-index
-# → lưu ra: output/cpr/FAFA_experiment/faiss_maxsim.faissindex
+python visualize_faiss_search.py \
+    --exp-dir output/cpr/FAFA_experiment \
+    --itcpr-root ~/Composed_Person_Retrieval/ITCPR \
+    --gallery-cache gallery_cache.pt \
+    --nprobe 5 --nlist 100 --k-candidates 300 \
+    --query-idx "0,42,100"
 
-# Load lại lần sau (bỏ qua build time ~30s):
-python inference_indexed.py ... --strategy maxsim --load-index output/cpr/FAFA_experiment/faiss_maxsim
+# Scp về local
+scp -r -i ~/.ssh/id_rsa vanwtoanf@34.125.49.208:~/Composed_Person_Retrieval/FAFA_SynCPR/output/cpr/FAFA_experiment/viz/ .
 ```
 
 ---
 
-## 5. Kết quả thực nghiệm
+## 6. Kết quả thực nghiệm — IVFFlat (nlist=100, sweep nprobe)
 
-> **Server:** NVIDIA L4 (23.7 GB VRAM), CUDA 12.4, PyTorch 2.6.0
+> **Server:** NVIDIA L4 (23.7 GB VRAM), CUDA 12.4, PyTorch 2.6.0  
+> **Index:** `IndexIVFFlat` nlist=100, K'=300, strategy=MeanSim  
+> **Baseline:** `IndexFlatIP` (exact search, kết quả từ Section 6)
 
-### 5.1 Gallery cache
+### Bảng so sánh: Exact vs IVFFlat với nprobe = 3, 5, 7, 10
+
+| Phương pháp | nprobe | R@1 | R@5 | R@10 | mAP | Recall@K' | Search(s) | Total(s) |
+|---|---|---|---|---|---|---|---|---|
+| **Exact (baseline)** | — | **46.685** | **66.258** | **73.252** | **55.692** | **100%** | **15.80** | **19.5** |
+| IVFFlat MeanSim K'=300 | 3 | 39.555 | 54.314 | 58.992 | 46.072 | 67.9% | 0.71 | 4.4 |
+| IVFFlat MeanSim K'=300 | 5 | 43.052 | 59.446 | 64.623 | 50.313 | 77.7% | 0.67 | 4.3 |
+| IVFFlat MeanSim K'=300 | 7 | 44.369 | 61.353 | 67.575 | 52.159 | 82.1% | 0.70 | 4.4 |
+| IVFFlat MeanSim K'=300 | 10 | 45.232 | 63.124 | 69.982 | 53.454 | 86.2% | 0.74 | 4.6 |
+| FlatIP MeanSim (exact FAISS) | 100 | 46.639 | 66.258 | 73.252 | 55.658 | 94.9% | 0.56 | 4.2 |
+
+> **FlatIP MeanSim** = `IndexFlatIP` (search toàn bộ G vectors, không phân cụm) — đây là điểm sweet-spot tốt nhất.
+
+### Nhận xét về IVFFlat
+
+- Với nprobe nhỏ (3–10 / 100 cụm): chỉ search **3–10% gallery** → nhanh nhưng Recall@K' thấp (68–86%), R@1 giảm đáng kể (39–45 vs 46.7 exact).
+- Nguyên nhân: 1 cụm chứa ~205 ảnh (= 20510/100). nprobe=10 → chỉ search 2050 ảnh → bỏ sót nhiều GT.
+- IVFFlat có lợi thế rõ hơn khi **gallery rất lớn** (hàng triệu ảnh). Với G=20.510, `IndexFlatIP` đã đủ nhanh (0.56s) nên **không cần IVFFlat**.
+
+---
+
+## 6.b Per-Query Latency (Production Scenario)
+
+> Mô phỏng production thực tế: **1 query đơn lẻ** (1 ảnh + 1 text) → tìm ảnh đích.  
+> n=50 query, GPU warmup trước, đo mean / P50 / P95.
+
+### Kết quả
+
+| Giai đoạn | Mean | P50 | P95 |
+|---|---|---|---|
+| **Query extraction** (ViT + Q-Former) | **54.9 ms** | 54.6 ms | 58.5 ms |
+| *(giống nhau cho mọi method — không thể tránh)* | | | |
+| Exact search (brute-force, G=20.510) | 3.0 ms | 3.0 ms | 3.1 ms |
+| → **Total per-query (exact)** | **57.9 ms** | | |
+| FAISS IVF nprobe=3, K'=300 | 0.6 ms | 0.6 ms | 0.7 ms |
+| FAISS IVF nprobe=5, K'=300 | 0.6 ms | 0.6 ms | 0.6 ms |
+| FAISS IVF nprobe=7, K'=300 | 0.6 ms | 0.6 ms | 0.6 ms |
+| FAISS IVF nprobe=10, K'=300 | 0.6 ms | 0.6 ms | 0.7 ms |
+| → **Total per-query (FAISS IVF)** | **~55.5 ms** | | |
+
+### Phân tích
+
+- **Search speedup**: 3.0ms → 0.6ms = **×5 nhanh hơn** cho giai đoạn search
+- **Total per-query**: 57.9ms → 55.5ms — cải thiện nhỏ vì query extraction (54.9ms) chiếm phần lớn
+- Bottleneck thực sự là **query extraction**, không phải search — đây là chi phí không thể tránh của model FAFA
+- Để giảm total per-query time cần tối ưu inference model (quantization, distillation) — nằm ngoài phạm vi đề tài này
+
+---
+
+---
+
+## 7. Kết quả thực nghiệm — FlatIP Index (sweep K')
+
+> **Server:** NVIDIA L4 (23.7 GB VRAM), CUDA 12.4, PyTorch 2.6.0  
+> **Index:** `IndexFlatIP` (exact FAISS — search toàn bộ G vectors)
+
+### 7.1 Gallery cache
 
 | Metric | Giá trị |
 |---|---|
@@ -312,7 +348,7 @@ python inference_indexed.py ... --strategy maxsim --load-index output/cpr/FAFA_e
 | Gallery extraction time (1 lần) | **445 s** |
 | Load cache time (mỗi lần tiếp theo) | **0.57 s** → tiết kiệm 444s / lần eval |
 
-### 5.2 Bảng so sánh đầy đủ
+### 7.2 Bảng so sánh đầy đủ
 
 > Thời gian **Search(s)** = FAISS search + exact re-ranking (KHÔNG bao gồm query extraction ~52s hay model load ~55s).  
 > Thời gian **Total(s)** = tổng thời gian trong giai đoạn retrieval (search + ranking metrics).
@@ -334,14 +370,14 @@ python inference_indexed.py ... --strategy maxsim --load-index output/cpr/FAFA_e
 | FAISS MeanSim | 500 | 46.549 | 66.258 | 73.252 | 55.619 | 96.4% | **0.75** | 4.6 |
 | **FAISS MeanSim** | **1000** | **46.639** | **66.258** | **73.252** | **55.667** | **97.9%** | **1.24** | **5.0** |
 
-### 5.3 FAISS Index build time
+### 7.3 FAISS Index build time
 
 | Index type | Số vector | Build time (s) |
 |---|---|---|
 | MaxSim (G×32 tokens) | 656.320 | **0.43 s** (GPU FAISS) |
 | MeanSim (G mean vectors) | 20.510 | **0.34 s** |
 
-### 5.4 Breakdown thời gian per-method (so sánh K'=300, MeanSim vs Exact)
+### 7.4 Breakdown thời gian per-method (so sánh K'=300, MeanSim vs Exact)
 
 | Giai đoạn | Exact | FAISS MeanSim K'=300 |
 |---|---|---|
@@ -356,9 +392,9 @@ python inference_indexed.py ... --strategy maxsim --load-index output/cpr/FAFA_e
 
 ---
 
-## 6. Phân tích kết quả
+## 8. Phân tích kết quả
 
-### 6.1 Quan sát chính
+### 8.1 Quan sát chính (FlatIP)
 
 1. **R@5 và R@10 không đổi** ở hầu hết K' ≥ 200 — FAISS giữ nguyên hoàn toàn các metric này.
 2. **R@1 giảm tối thiểu**: Exact = 46.685, FAISS MeanSim K'=1000 = 46.639 (chênh **0.046pp** — nhỏ hơn nhiễu đo lường thông thường).
@@ -366,7 +402,7 @@ python inference_indexed.py ... --strategy maxsim --load-index output/cpr/FAFA_e
 4. **Recall@K' plateau ở ~96.6% cho MaxSim** do GPU FAISS giới hạn k≤2048. MeanSim không bị giới hạn này (Recall@1000 = 97.9%).
 5. **Biggest gain là gallery cache**: tiết kiệm 444s / lần eval (từ 445s xuống 0.57s để load).
 
-### 6.2 Khuyến nghị K' tối ưu
+### 8.2 Khuyến nghị K' tối ưu (FlatIP)
 
 **Khuyến nghị: FAISS MeanSim K'=300 hoặc K'=1000**
 
@@ -376,7 +412,7 @@ python inference_indexed.py ... --strategy maxsim --load-index output/cpr/FAFA_e
 | Accuracy gần perfect, vẫn nhanh | MeanSim K'=1000 (Search: 1.24s, 12.8× nhanh, R@1 diff = 0.046pp) |
 | So sánh với MaxSim | MaxSim K'=300 cho cùng kết quả nhưng tốn 8.74s tìm kiếm |
 
-### 6.3 Tại sao MeanSim thực ra không kém MaxSim?
+### 8.3 Tại sao MeanSim thực ra không kém MaxSim?
 
 Mặc dù MaxSim là upper-bound chặt hơn về mặt lý thuyết, nhưng trong thực nghiệm:
 - Cả hai đều cho Recall@K' tương đương (84-97%)
@@ -387,7 +423,7 @@ Mặc dù MaxSim là upper-bound chặt hơn về mặt lý thuyết, nhưng tro
 
 ---
 
-## 7. Kết luận
+## 9. Kết luận
 
 ### Đóng góp cho đồ án
 
