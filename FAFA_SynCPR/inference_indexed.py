@@ -56,8 +56,8 @@ from validate_blip import (
     aggregate_topk,
 )
 from faiss_retrieval import (
-    MaxSimIndex, MeanSimIndex, fda_rerank, compute_recall_at_K,
-    exact_search_single, faiss_search_single,
+    MaxSimIndex, MeanSimIndex, fda_rerank, fda_rerank_clusters,
+    compute_recall_at_K, exact_search_single, faiss_search_single,
 )
 from utils import collate_fn
 
@@ -148,6 +148,72 @@ def run_exact_baseline(model, query_set, gfeats, gids, qids, qfeats, fda_k, devi
     timings['ranking'] = time.time() - t0
 
     cmc = cmc.numpy()
+    return cmc[0], cmc[4], cmc[9], float(mAP.numpy()), float(mINP.numpy()), timings
+
+
+# ---------------------------------------------------------------------------
+# IVF-clusters inference (không K', không MeanSim/MaxSim filter)
+# ---------------------------------------------------------------------------
+
+def run_ivf_clusters(
+    index: MeanSimIndex,
+    gfeats: torch.Tensor,
+    gids: torch.Tensor,
+    qids: torch.Tensor,
+    qfeats: torch.Tensor,
+    nprobe: int,
+    fda_k: int,
+    device: str,
+):
+    """
+    IVF-only pipeline: chọn nprobe cụm gần nhất → exact FDA trên tất cả ảnh
+    trong các cụm đó. Không có bước lọc K'.
+
+    Returns metrics + timing dict.
+    """
+    timings = {}
+    G = gfeats.shape[0]
+
+    # ── 1. IVF search: lấy tất cả ảnh trong nprobe cụm ─────────────────────
+    t0 = time.time()
+    qfeats_np = qfeats.numpy().astype(np.float32)
+    candidate_gidxs = index.search_clusters(qfeats_np, nprobe=nprobe)  # [Q, K_auto]
+    timings['ivf_search'] = time.time() - t0
+
+    # Đếm số candidates thực tế (bỏ -1)
+    n_valid = int((candidate_gidxs >= 0).sum() / len(qfeats_np))
+    print(f"  IVF search done in {timings['ivf_search']:.3f}s  "
+          f"(~{n_valid} candidates/query trung bình)")
+
+    # ── 2. Recall@candidates diagnostic ──────────────────────────────────────
+    t0 = time.time()
+    recall_k = compute_recall_at_K(qids, gids, candidate_gidxs)
+    timings['recall_check'] = time.time() - t0
+    print(f"  Recall@clusters: {recall_k*100:.2f}%  "
+          f"— tỷ lệ query có GT trong {nprobe} cụm được search")
+
+    # ── 3. Exact FDA re-ranking trên tất cả valid candidates ─────────────────
+    t0 = time.time()
+    similarity = fda_rerank_clusters(
+        qfeats=qfeats,
+        gfeats_full=gfeats,
+        candidate_gidxs=candidate_gidxs,
+        fda_k=fda_k,
+        device=device,
+    )
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
+    timings['exact_rerank'] = time.time() - t0
+    print(f"  Exact FDA re-ranking done in {timings['exact_rerank']:.3f}s")
+
+    # ── 4. Ranking metrics ───────────────────────────────────────────────────
+    t0 = time.time()
+    cmc, mAP, mINP, _ = rank(similarity, qids, gids, max_rank=10, get_mAP=True)
+    timings['ranking'] = time.time() - t0
+
+    cmc = cmc.numpy()
+    timings['recall_at_K']       = recall_k
+    timings['n_candidates_avg']  = n_valid
     return cmc[0], cmc[4], cmc[9], float(mAP.numpy()), float(mINP.numpy()), timings
 
 
@@ -409,6 +475,11 @@ def main():
     parser.add_argument('--exact-baseline', action='store_true',
                         help='Cũng chạy exact brute-force để so sánh thời gian')
 
+    # IVF-clusters mode (không K', không filter)
+    parser.add_argument('--ivf-clusters',  action='store_true',
+                        help='IVF-only mode: nprobe cụm → exact FDA trên tất cả ảnh trong cụm, '
+                             'không có bước lọc K\'. Dùng với --sweep-nprobe.')
+
     # Per-query latency
     parser.add_argument('--per-query-timing', type=int, default=0, metavar='N',
                         help='Đo latency cho 1 query đơn lẻ (production scenario). '
@@ -589,6 +660,38 @@ def main():
                 'search_sec': elapsed_search,
                 'recall_at_K': timings_f['recall_at_K'],
                 'timings': timings_f,
+            })
+
+    # ── IVF-clusters sweep (không K', không filter) ───────────────────────────
+    if args.ivf_clusters:
+        assert args.use_ivf, "--ivf-clusters yêu cầu --use-ivf"
+        nprobe_sweep = [int(x) for x in args.sweep_nprobe.split(',')] \
+                       if args.sweep_nprobe else [args.nprobe]
+
+        for nprobe in nprobe_sweep:
+            label = f"IVF nprobe={nprobe} (tất cả ảnh trong {nprobe} cụm)"
+            print("\n" + "="*65)
+            print(label)
+            print("="*65)
+            t_total = time.time()
+            R1, R5, R10, mAP, mINP, timings_c = run_ivf_clusters(
+                index=index, gfeats=gfeats, gids=gids,
+                qids=qids, qfeats=qfeats,
+                nprobe=nprobe, fda_k=fda_k, device=str(device),
+            )
+            elapsed_total = time.time() - t_total
+            elapsed_search = timings_c['ivf_search'] + timings_c['exact_rerank']
+            print_metrics(label, R1, R5, R10, mAP, mINP,
+                          elapsed_total=elapsed_total, elapsed_search=elapsed_search)
+            print(f"  Timings: {timings_c}")
+            all_results.append({
+                'method': f'IVF-clusters nprobe={nprobe}',
+                'K_prime': f"~{timings_c['n_candidates_avg']} (auto)",
+                'nprobe': nprobe,
+                'R1': R1, 'R5': R5, 'R10': R10, 'mAP': mAP, 'mINP': mINP,
+                'total_sec': elapsed_total, 'search_sec': elapsed_search,
+                'recall_at_K': timings_c['recall_at_K'],
+                'timings': timings_c,
             })
 
     # ── Per-query latency benchmark ───────────────────────────────────────────

@@ -277,6 +277,30 @@ class MeanSimIndex:
         distances, candidate_gidxs = self.index.search(qfeats.astype(np.float32), K_prime)
         return candidate_gidxs, distances
 
+    def search_clusters(
+        self,
+        qfeats: np.ndarray,  # [Q, 256]
+        nprobe: int,
+    ) -> np.ndarray:
+        """
+        IVF-only mode: chọn nprobe cụm gần nhất, trả về TẤT CẢ gallery
+        images trong các cụm đó. Không có bước lọc K'.
+
+        K' được tự tính = nprobe × ceil(G/nlist) × 3 để đủ buffer cho tất cả
+        valid candidates. FAISS trả về -1 cho các slot dư — caller tự lọc.
+
+        Returns: candidate_gidxs [Q, K_auto] — int64, -1 = slot không dùng
+        """
+        assert self.use_ivf, "search_clusters chỉ dùng được với IndexIVFFlat"
+        self.set_nprobe(nprobe)
+        avg_cluster_size = max(1, self.G // self.nlist)
+        K_auto = int(nprobe * avg_cluster_size * 3)
+        K_auto = min(K_auto, self.G)
+        distances, candidate_gidxs = self.index.search(
+            qfeats.astype(np.float32), K_auto
+        )
+        return candidate_gidxs  # [Q, K_auto], -1 cho slot không dùng
+
     def save(self, path: str):
         faiss.write_index(self.index, path + ".faissindex")
         torch.save({
@@ -369,6 +393,53 @@ def fda_rerank(
         similarity[q_start:q_end].scatter_(1, cand_sorted, scores_sorted)
 
     return similarity.cpu()  # [Q, G]
+
+
+# ---------------------------------------------------------------------------
+# FDA re-ranking cho IVF cluster output (không có K' filter)
+# ---------------------------------------------------------------------------
+
+def fda_rerank_clusters(
+    qfeats: torch.Tensor,          # [Q, 256]
+    gfeats_full: torch.Tensor,     # [G, 32, 256]
+    candidate_gidxs: np.ndarray,   # [Q, K_auto] — -1 cho slot không dùng
+    fda_k: int = 6,
+    device: str = 'cuda',
+) -> torch.Tensor:                 # [Q, G] similarity matrix
+    """
+    Exact FDA re-ranking cho output của search_clusters().
+    Mỗi query chỉ compute FDA trên các gallery images thực sự trong nprobe cụm
+    (lọc -1 trước). Không có bước lọc K' — tất cả valid candidates đều được xét.
+
+    Xử lý từng query để tránh OOM khi K_auto lớn.
+    """
+    Q = qfeats.shape[0]
+    G = gfeats_full.shape[0]
+    dev = torch.device(device if torch.cuda.is_available() else 'cpu')
+
+    qfeats_dev  = qfeats.to(dev)
+    gfeats_dev  = gfeats_full.to(dev)
+    similarity  = torch.full((Q, G), -1.0, device=dev)
+
+    for q in range(Q):
+        # Lọc -1 (FAISS IVF trả về -1 cho slot không có candidate thực)
+        valid = candidate_gidxs[q][candidate_gidxs[q] >= 0].astype(np.int64)
+        if len(valid) == 0:
+            continue
+
+        cand_t     = torch.from_numpy(valid).to(dev)        # [K_valid]
+        cand_feats = gfeats_dev[cand_t]                     # [K_valid, 32, 256]
+        q_feat     = qfeats_dev[q].unsqueeze(0)             # [1, 256]
+
+        # dot product: [1, 256] × [K_valid, 256, 32] → [K_valid, 32]
+        sim_qt = torch.matmul(q_feat, cand_feats.permute(0, 2, 1)).squeeze(0)
+
+        top_vals, _ = torch.topk(sim_qt, k=fda_k, dim=-1)
+        scores = top_vals.mean(dim=-1)                       # [K_valid]
+
+        similarity[q, cand_t] = scores
+
+    return similarity.cpu()
 
 
 # ---------------------------------------------------------------------------
