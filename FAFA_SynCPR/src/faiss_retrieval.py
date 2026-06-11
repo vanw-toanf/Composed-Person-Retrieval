@@ -427,12 +427,12 @@ def fda_rerank_clusters(
         if len(valid) == 0:
             continue
 
-        cand_t     = torch.from_numpy(valid).to(dev)        # [K_valid]
-        cand_feats = gfeats_dev[cand_t]                     # [K_valid, 32, 256]
-        q_feat     = qfeats_dev[q].unsqueeze(0)             # [1, 256]
+        cand_t     = torch.from_numpy(valid).to(dev)  # [K_valid]
+        cand_feats = gfeats_dev[cand_t]              # [K_valid, 32, 256]
+        q_vec      = qfeats_dev[q]                   # [256]
 
-        # dot product: [1, 256] × [K_valid, 256, 32] → [K_valid, 32]
-        sim_qt = torch.matmul(q_feat, cand_feats.permute(0, 2, 1)).squeeze(0)
+        # [K_valid, 32, 256] × [256] → [K_valid, 32]
+        sim_qt = torch.matmul(cand_feats, q_vec)
 
         top_vals, _ = torch.topk(sim_qt, k=fda_k, dim=-1)
         scores = top_vals.mean(dim=-1)                       # [K_valid]
